@@ -1,0 +1,14 @@
+[package]
+name = "gdrcopy-rs"
+version = "0.1.0"
+authors = ["Ben Simms <ben@bensimms.moe>"]
+edition = "2018"
+
+[lib]
+name = "gdrcopy"
+
+[dependencies]
+libc = "0.2.73"
+
+[build-dependencies]
+bindgen = "0.54.1"
