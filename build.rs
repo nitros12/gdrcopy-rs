@@ -2,7 +2,7 @@ use std::{env, path::PathBuf};
 
 fn main() {
     println!("cargo:rustc-link-lib=gdrapi");
-    println!("cargo:rerun-if-changed=src/");
+    println!("cargo:rerun-if-changed=src/*");
 
     let bindings = bindgen::Builder::default()
         .header("src/bindings.h")

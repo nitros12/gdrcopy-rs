@@ -3,7 +3,7 @@ use cuda_sys::cuda::{
     CUDA_POINTER_ATTRIBUTE_P2P_TOKENS,
 };
 use libc::c_ulong;
-use rustacuda::memory::DeviceBuffer;
+use rustacuda::{error::CudaResult, memory::DeviceBuffer};
 use std::{
     ffi::c_void,
     mem::MaybeUninit,
@@ -23,6 +23,31 @@ pub struct GDR {
     gdr: NonNull<ffi::gdr>,
 }
 
+trait IntoCudaResult
+where
+    Self: Sized,
+{
+    fn to_result(self) -> CudaResult<()>;
+}
+
+// :S
+impl IntoCudaResult for i32 {
+    fn to_result(self) -> CudaResult<()> {
+        let r = unsafe { std::mem::transmute::<_, CUresult>(self as u32) };
+        r.to_result()
+    }
+}
+
+impl IntoCudaResult for CUresult {
+    fn to_result(self) -> CudaResult<()> {
+        if self == CUresult::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(unsafe { std::mem::transmute(self) })
+        }
+    }
+}
+
 impl GDR {
     pub fn open() -> Option<GDR> {
         let gdr = unsafe { ffi::gdr_open() };
@@ -32,23 +57,20 @@ impl GDR {
     pub fn map_device_buffer<'a, 'handle: 'a, 'buffer: 'a>(
         &'handle self,
         buffer: &'buffer mut DeviceBuffer<u8>,
-    ) -> Option<GDRMap<'a>> {
+    ) -> CudaResult<GDRMap<'a>> {
         let device_addr = buffer.as_device_ptr().as_raw_mut() as usize;
         let len = buffer.len();
 
         let mut tokens = MaybeUninit::<CUDA_POINTER_ATTRIBUTE_P2P_TOKENS>::uninit();
 
-        if CUresult::CUDA_SUCCESS
-            != unsafe {
-                cuPointerGetAttribute(
-                    tokens.as_mut_ptr() as *mut c_void,
-                    CUpointer_attribute::CU_POINTER_ATTRIBUTE_P2P_TOKENS,
-                    device_addr as CUdeviceptr,
-                )
-            }
-        {
-            return None;
+        unsafe {
+            cuPointerGetAttribute(
+                tokens.as_mut_ptr() as *mut c_void,
+                CUpointer_attribute::CU_POINTER_ATTRIBUTE_P2P_TOKENS,
+                device_addr as CUdeviceptr,
+            )
         }
+        .to_result()?;
 
         let tokens = unsafe { tokens.assume_init() };
 
@@ -61,14 +83,14 @@ impl GDR {
         len: usize,
         p2p_token: u64,
         va_space: u32,
-    ) -> Option<GDRMap> {
+    ) -> CudaResult<GDRMap> {
         let mut g = self.gdr;
         let mut handle = MaybeUninit::<ffi::gdr_mh_s>::uninit();
 
         // align to gpu page
         let len = (len + ffi::GPU_PAGE_SIZE as usize - 1) & ffi::GPU_PAGE_MASK as usize;
 
-        if 0 != unsafe {
+        unsafe {
             ffi::gdr_pin_buffer(
                 g.as_mut(),
                 device_addr as c_ulong,
@@ -77,21 +99,22 @@ impl GDR {
                 va_space,
                 handle.as_mut_ptr(),
             )
-        } {
-            return None;
         }
+        .to_result()?;
 
         let handle = unsafe { handle.assume_init() };
         let mut p = MaybeUninit::<*mut c_void>::uninit();
 
-        if 0 != unsafe { ffi::gdr_map(g.as_mut(), handle, p.as_mut_ptr(), len as u64) } {
+        if let Err(e) =
+            unsafe { ffi::gdr_map(g.as_mut(), handle, p.as_mut_ptr(), len as u64) }.to_result()
+        {
             unsafe { ffi::gdr_unpin_buffer(g.as_mut(), handle) };
-            return None;
+            return Err(e);
         }
 
         let buf = unsafe { p.assume_init() as *mut u8 };
 
-        Some(GDRMap {
+        Ok(GDRMap {
             gdr: self,
             handle,
             buf,
@@ -161,12 +184,36 @@ impl<'handle> Drop for GDRMap<'handle> {
 
 #[cfg(test)]
 mod tests {
-    use super::ffi::*;
+    use super::{ffi::*, *};
 
     #[test]
     fn test_open() {
         let gdr = unsafe { gdr_open() };
         assert!(!gdr.is_null());
         unsafe { gdr_close(gdr) };
+    }
+
+    #[test]
+    fn test_device_buf() {
+        use rustacuda::memory::DeviceBuffer;
+
+        rustacuda::init(rustacuda::CudaFlags::empty()).expect("couldn't init cuda");
+
+        let device = rustacuda::device::Device::get_device(0).expect("couldn't get device");
+        println!("device name: {}", device.name().unwrap());
+
+        let _ctx = rustacuda::context::Context::create_and_push(
+            rustacuda::context::ContextFlags::SCHED_AUTO,
+            device,
+        )
+        .expect("couldn't create device context");
+
+        let mut buf =
+            DeviceBuffer::from_slice(&[1u8, 2, 3, 4, 5]).expect("couldn't make device buffer");
+
+        let gdr = GDR::open().expect("couldn't open gdr handle");
+        let _mapping = gdr
+            .map_device_buffer(&mut buf)
+            .expect("couldn't map device buffer");
     }
 }
