@@ -1,4 +1,9 @@
+use cuda_sys::cuda::{
+    cuPointerGetAttribute, CUdeviceptr, CUpointer_attribute, CUresult,
+    CUDA_POINTER_ATTRIBUTE_P2P_TOKENS,
+};
 use libc::c_ulong;
+use rustacuda::memory::DeviceBuffer;
 use std::{
     ffi::c_void,
     mem::MaybeUninit,
@@ -22,6 +27,32 @@ impl GDR {
     pub fn open() -> Option<GDR> {
         let gdr = unsafe { ffi::gdr_open() };
         NonNull::new(gdr).map(|p| GDR { gdr: p })
+    }
+
+    pub fn map_device_buffer<'a, 'handle: 'a, 'buffer: 'a>(
+        &'handle self,
+        buffer: &'buffer mut DeviceBuffer<u8>,
+    ) -> Option<GDRMap<'a>> {
+        let device_addr = buffer.as_device_ptr().as_raw_mut() as usize;
+        let len = buffer.len();
+
+        let mut tokens = MaybeUninit::<CUDA_POINTER_ATTRIBUTE_P2P_TOKENS>::uninit();
+
+        if CUresult::CUDA_SUCCESS
+            != unsafe {
+                cuPointerGetAttribute(
+                    tokens.as_mut_ptr() as *mut c_void,
+                    CUpointer_attribute::CU_POINTER_ATTRIBUTE_P2P_TOKENS,
+                    device_addr as CUdeviceptr,
+                )
+            }
+        {
+            return None;
+        }
+
+        let tokens = unsafe { tokens.assume_init() };
+
+        self.map(device_addr, len, tokens.p2pToken, tokens.vaSpaceToken)
     }
 
     pub fn map(

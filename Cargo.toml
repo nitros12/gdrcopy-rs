@@ -9,6 +9,8 @@ name = "gdrcopy"
 
 [dependencies]
 libc = "0.2.73"
+rustacuda = "0.1.2"
+cuda-sys = "0.2.0"
 
 [build-dependencies]
 bindgen = "0.54.1"
